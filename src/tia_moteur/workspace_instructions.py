@@ -69,9 +69,7 @@ class WorkspaceInstructionsLoader:
             ) from exc
 
         if not content:
-            raise WorkspaceInstructionsError(
-                f"Le fichier d'instructions est vide: {path}"
-            )
+            return None
         if len(content) > self.max_chars:
             raise WorkspaceInstructionsError(
                 "Le fichier d'instructions dépasse la limite de "

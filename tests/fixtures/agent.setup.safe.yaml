@@ -1,0 +1,54 @@
+version: 1
+
+tools:
+  bash:
+    enabled: true
+    execution_mode: direct
+    allowed_executables:
+      - file
+      - find
+      - git
+      - ls
+      - printf
+      - pwd
+      - rg
+      - sort
+    forbidden_executables:
+      - rm
+      - sudo
+    command_rules:
+      file:
+        forbidden_arguments:
+          - --compile
+          - -C
+      find:
+        forbidden_argument_prefixes:
+          - -delete
+          - -exec
+          - -fls
+          - -fprintf
+          - -fprint
+          - -ok
+      git:
+        allowed_subcommands:
+          - diff
+          - grep
+          - log
+          - ls-files
+          - rev-parse
+          - show
+          - status
+        forbidden_arguments:
+          - --ext-diff
+          - --open-files-in-pager
+        forbidden_argument_prefixes:
+          - --output
+          - -O
+      rg:
+        forbidden_arguments:
+          - --pre
+          - --pre-glob
+      sort:
+        forbidden_argument_prefixes:
+          - --output
+          - -o

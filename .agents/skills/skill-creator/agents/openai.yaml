@@ -1,0 +1,4 @@
+interface:
+  display_name: "Créateur de skills"
+  short_description: "Créer et valider des skills pour TIA"
+  default_prompt: "Utilise $skill-creator pour créer un nouveau skill TIA."

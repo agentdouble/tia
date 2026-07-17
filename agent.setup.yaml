@@ -1,0 +1,10 @@
+version: 1
+
+skills:
+  enabled: true
+
+tools:
+  bash:
+    enabled: true
+    execution_mode: unrestricted_shell
+    shell: /bin/zsh

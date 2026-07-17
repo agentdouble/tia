@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coco → OK Bilouche"
+  short_description: "Répondre « ok bilouche » à « coco »"
+  default_prompt: "Utilise $coco-ok-bilouche pour répondre à coco."

@@ -3,7 +3,7 @@
 import asyncio
 import os
 import signal
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Protocol
 
@@ -41,11 +41,13 @@ class BashExecutor:
         timeout_seconds: float,
         max_output_chars: int,
         policy: CommandPolicy,
+        environment: Mapping[str, str] | None = None,
     ) -> None:
         self.workspace = workspace
         self.timeout_seconds = timeout_seconds
         self.max_output_chars = max_output_chars
         self.policy = policy
+        self._environment = dict(environment) if environment is not None else None
 
     async def run(self, command: str) -> BashResult:
         """Exécute une commande et retourne stdout, stderr et le code de sortie."""
@@ -69,6 +71,7 @@ class BashExecutor:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=True,
+                env=self._environment,
             )
         except FileNotFoundError:
             return BashResult(
@@ -88,6 +91,14 @@ class BashExecutor:
         except TimeoutError:
             timed_out = True
             await self._stop_process(process)
+        except BaseException:
+            await asyncio.shield(self._stop_process(process))
+            await asyncio.gather(
+                stdout_task,
+                stderr_task,
+                return_exceptions=True,
+            )
+            raise
 
         stdout, stdout_truncated = await stdout_task
         stderr, stderr_truncated = await stderr_task

@@ -1,5 +1,7 @@
 """Tests du tool Bash sans appel à un LLM."""
 
+import asyncio
+import os
 from pathlib import Path
 import shlex
 
@@ -60,3 +62,34 @@ async def test_truncates_large_output(tmp_path: Path) -> None:
     assert result.output_truncated is True
     assert result.stdout.endswith("[sortie tronquée]")
     assert len(result.stdout) < 1_100
+
+
+async def test_cancellation_stops_the_process_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "child.pid"
+    command = tmp_path / "long-command"
+    command.write_text(
+        f"#!/bin/sh\necho $$ > {shlex.quote(str(pid_file))}\nexec sleep 60\n",
+        encoding="utf-8",
+    )
+    command.chmod(0o700)
+    task = asyncio.create_task(make_executor(tmp_path).run(str(command)))
+
+    for _ in range(100):
+        if pid_file.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert pid_file.exists()
+    child_pid = int(pid_file.read_text(encoding="utf-8"))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    for _ in range(100):
+        try:
+            os.kill(child_pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.01)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)

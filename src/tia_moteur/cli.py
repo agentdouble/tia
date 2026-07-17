@@ -1,41 +1,35 @@
-"""Interface en ligne de commande de l'agent."""
+"""Adaptateurs terminal interactif et headless JSONL de TIA."""
+
+from __future__ import annotations
 
 import argparse
 import asyncio
-import os
+from contextlib import redirect_stdout
+from dataclasses import dataclass, field
 from pathlib import Path
+import signal
 import sys
+from uuid import uuid4
 
-from pydantic_ai import (
-    AgentRunResultEvent,
-    FunctionToolCallEvent,
-    ModelMessage,
+from tia_moteur.events import (
+    InstructionsChangedEvent,
+    RunCompletedEvent,
+    RunFailedEvent,
+    SkillActivatedEvent,
+    TiaEventBase,
+    ToolCalledEvent,
+    ToolCompletedEvent,
+    event_to_json_line,
 )
-from tia_moteur.agent import build_agent
-from tia_moteur.agent_setup import AgentSetup, load_layered_agent_setup
-from tia_moteur.config import Settings
-from tia_moteur.portable_config import (
-    RuntimePaths,
-    build_runtime_paths,
-    compose_environment,
-    get_config_home,
-    initialize_global_config,
-    read_env_file,
-    resolve_workspace,
-)
-from tia_moteur.skills import (
-    SkillRegistry,
-    build_skill_run_context,
-    combine_runtime_instructions,
-)
-from tia_moteur.tool_display import format_tool_call
-from tia_moteur.workspace_instructions import WorkspaceInstructionsLoader
+from tia_moteur.portable_config import initialize_global_config
+from tia_moteur.runtime import TiaRuntime
+from tia_moteur.tool_display import format_tool_values
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="tia",
-        description="Agent local Pydantic AI avec accès à un tool Bash.",
+        description="Agent local Pydantic AI avec accès à des tools.",
     )
     parser.add_argument(
         "prompt",
@@ -54,70 +48,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def build_headless_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="tia run",
+        description="Exécute TIA sans interface et émet un flux JSONL versionné.",
+    )
+    parser.add_argument(
+        "prompt",
+        nargs="?",
+        help="Demande unique. Sans argument, elle est lue sur stdin jusqu'à EOF.",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("jsonl",),
+        default="jsonl",
+        help="Format machine de stdout (défaut: jsonl).",
+    )
+    parser.add_argument("--session-id", help="Identifiant de corrélation de session.")
+    parser.add_argument("--model", help="Modèle Pydantic AI à utiliser.")
+    parser.add_argument("--workspace", type=Path, help="Workspace du run.")
+    return parser
+
+
 async def run_interactive(
-    settings: Settings,
+    runtime: TiaRuntime,
     first_prompt: str | None,
-    *,
-    paths: RuntimePaths,
-    setup: AgentSetup,
 ) -> None:
-    skill_registry = SkillRegistry.from_settings(settings)
-    agent = build_agent(settings, skill_registry, setup)
-    global_instructions_loader = WorkspaceInstructionsLoader(
-        workspace=paths.config_home,
-        instructions_file=Path("AGENTS.md"),
-        max_chars=settings.max_instructions_chars,
-        scope="globales de TIA",
-    )
-    project_instructions_loader = WorkspaceInstructionsLoader(
-        workspace=settings.workspace,
-        instructions_file=settings.instructions_file,
-        max_chars=settings.max_instructions_chars,
-        scope="du projet",
-    )
-    history: list[ModelMessage] = []
+    """Rend les événements d'une session dans le terminal historique."""
+    info = runtime.inspect()
+    session = runtime.create_session()
     prompt = first_prompt
 
-    initial_global_instructions = global_instructions_loader.load()
-    initial_project_instructions = project_instructions_loader.load()
-    initial_skill_context = (
-        build_skill_run_context(skill_registry, "")
-        if setup.skills.enabled
-        else None
-    )
-    instructions_digests = {
-        "global": (
-            initial_global_instructions.digest
-            if initial_global_instructions is not None
-            else None
-        ),
-        "project": (
-            initial_project_instructions.digest
-            if initial_project_instructions is not None
-            else None
-        ),
-    }
-
-    print(f"TIA — modèle: {settings.model}")
-    print(f"Workspace: {settings.workspace}")
-    print(f"Configuration globale: {paths.config_home}")
-    instruction_paths = [
-        instructions.path
-        for instructions in (
-            initial_global_instructions,
-            initial_project_instructions,
-        )
-        if instructions is not None
-    ]
-    if not instruction_paths:
+    print(f"TIA — modèle: {info.model}")
+    print(f"Workspace: {info.workspace}")
+    print(f"Configuration globale: {info.config_home}")
+    if not info.instruction_paths:
         print("Instructions: prompt de base uniquement")
     else:
-        sources = " + ".join(str(path) for path in instruction_paths)
+        sources = " + ".join(str(path) for path in info.instruction_paths)
         print(f"Instructions: prompt de base + {sources}")
-    if initial_skill_context is None:
+    if not info.skills_enabled:
         print("Skills: désactivés par agent.setup.yaml")
     else:
-        print(f"Skills: {initial_skill_context.available_count} détecté(s)")
+        print(f"Skills: {info.available_skills} détecté(s)")
 
     while True:
         if prompt is None:
@@ -134,57 +107,22 @@ async def run_interactive(
             prompt = None
             continue
 
-        try:
-            global_instructions = global_instructions_loader.load()
-            project_instructions = project_instructions_loader.load()
-            current_instruction_layers = {
-                "global": global_instructions,
-                "project": project_instructions,
-            }
-            for layer, instructions in current_instruction_layers.items():
-                current_digest = instructions.digest if instructions is not None else None
-                if current_digest != instructions_digests[layer]:
-                    if instructions is None:
-                        print(f"\n[instructions] AGENTS.md {layer} retiré")
-                    else:
-                        print(f"\n[instructions] rechargé: {instructions.path}")
-                    instructions_digests[layer] = current_digest
-
-            skill_context = (
-                build_skill_run_context(skill_registry, prompt)
-                if setup.skills.enabled
-                else None
-            )
-            if skill_context is not None:
-                for skill in skill_context.activated:
-                    print(f"\n[skill] {skill.name}")
-
-            result = None
-            async with agent.run_stream_events(
-                prompt,
-                message_history=history or None,
-                instructions=combine_runtime_instructions(
-                    global_instructions.as_prompt()
-                    if global_instructions is not None
-                    else None,
-                    project_instructions.as_prompt()
-                    if project_instructions is not None
-                    else None,
-                    skill_context.prompt if skill_context is not None else None,
-                ),
-            ) as stream:
-                async for event in stream:
-                    if isinstance(event, FunctionToolCallEvent):
-                        print(format_tool_call(event.part))
-                    elif isinstance(event, AgentRunResultEvent):
-                        result = event.result
-        except Exception as exc:  # CLI: transformer l'erreur provider en message lisible.
-            print(f"\nErreur: {exc}")
-        else:
-            if result is None:
-                raise RuntimeError("L'agent s'est terminé sans résultat final.")
-            print(f"\nTIA > {result.output}")
-            history = result.all_messages()
+        async for event in session.stream(prompt):
+            if isinstance(event, InstructionsChangedEvent):
+                if event.action == "removed":
+                    print(f"\n[instructions] AGENTS.md {event.scope} retiré")
+                else:
+                    print(f"\n[instructions] rechargé: {event.path}")
+            elif isinstance(event, SkillActivatedEvent):
+                print(f"\n[skill] {event.name}")
+            elif isinstance(event, ToolCalledEvent):
+                if event.name != "load_skill":
+                    arguments = event.arguments if isinstance(event.arguments, dict) else {}
+                    print(format_tool_values(event.name, arguments))
+            elif isinstance(event, RunCompletedEvent):
+                print(f"\nTIA > {event.output}")
+            elif isinstance(event, RunFailedEvent):
+                print(f"\nErreur: {event.message}")
 
         if first_prompt is not None:
             return
@@ -206,56 +144,206 @@ def _run_init_command() -> None:
         print(f"Configuration TIA déjà initialisée: {result.root}")
 
 
+def _headless_prompt(parser: argparse.ArgumentParser, prompt: str | None) -> str:
+    if prompt is not None:
+        raw_prompt = prompt
+    elif sys.stdin.isatty():
+        parser.error("un prompt en argument ou sur stdin est obligatoire")
+    else:
+        raw_prompt = sys.stdin.read()
+    if not raw_prompt.strip():
+        parser.error("le prompt ne peut pas être vide")
+    return raw_prompt
+
+
+class _JsonlWriter:
+    """Écrit toujours le protocole en UTF-8, indépendamment du locale hôte."""
+
+    def __init__(self) -> None:
+        self._binary_stream = getattr(sys.stdout, "buffer", None)
+        self._text_stream = sys.stdout
+
+    def write(self, event: TiaEventBase) -> None:
+        line = event_to_json_line(event) + "\n"
+        if self._binary_stream is not None:
+            self._binary_stream.write(line.encode("utf-8"))
+            self._binary_stream.flush()
+        else:
+            self._text_stream.write(line)
+            self._text_stream.flush()
+
+
+@dataclass
+class _HeadlessState:
+    last_sequence: int = -1
+    interrupted_event_written: bool = False
+    interrupt_exit_code: int = 130
+    pending_tools: dict[str, str] = field(default_factory=dict)
+
+
+async def _stream_headless(
+    runtime: TiaRuntime,
+    *,
+    prompt: str,
+    session_id: str,
+    run_id: str,
+    state: _HeadlessState,
+    writer: _JsonlWriter,
+) -> int:
+    try:
+        session = runtime.create_session(session_id=session_id)
+    except Exception as exc:
+        failure = RunFailedEvent(
+            session_id=session_id,
+            run_id=run_id,
+            sequence=0,
+            code="configuration_error",
+            message=runtime.redact(str(exc)) or "Création de session impossible.",
+        )
+        writer.write(failure)
+        state.last_sequence = 0
+        return 1
+
+    exit_code = 1
+    try:
+        async for event in session.stream(prompt, run_id=run_id):
+            writer.write(event)
+            state.last_sequence = event.sequence
+            if isinstance(event, ToolCalledEvent):
+                state.pending_tools[event.tool_call_id] = event.name
+            elif isinstance(event, ToolCompletedEvent):
+                state.pending_tools.pop(event.tool_call_id, None)
+            if isinstance(event, RunCompletedEvent):
+                exit_code = 0
+            elif isinstance(event, RunFailedEvent):
+                exit_code = 1
+    except asyncio.CancelledError:
+        for tool_call_id, tool_name in tuple(state.pending_tools.items()):
+            state.last_sequence += 1
+            writer.write(
+                ToolCompletedEvent(
+                    session_id=session_id,
+                    run_id=run_id,
+                    sequence=state.last_sequence,
+                    tool_call_id=tool_call_id,
+                    name=tool_name,
+                    outcome="aborted",
+                    result={"reason": "interrupted"},
+                )
+            )
+        state.pending_tools.clear()
+        writer.write(
+            RunFailedEvent(
+                session_id=session_id,
+                run_id=run_id,
+                sequence=state.last_sequence + 1,
+                code="interrupted",
+                message="Exécution interrompue.",
+            )
+        )
+        state.interrupted_event_written = True
+        raise
+    return exit_code
+
+
+def _run_headless_command() -> int:
+    parser = build_headless_parser()
+    args = parser.parse_args(sys.argv[2:])
+    session_id = args.session_id or str(uuid4())
+    run_id = str(uuid4())
+    state = _HeadlessState()
+    writer = _JsonlWriter()
+    previous_sigterm_handler = None
+
+    if hasattr(signal, "SIGTERM"):
+        previous_sigterm_handler = signal.getsignal(signal.SIGTERM)
+
+        def handle_sigterm(signum, frame) -> None:
+            del frame
+            state.interrupt_exit_code = 128 + signum
+            raise KeyboardInterrupt
+
+        signal.signal(signal.SIGTERM, handle_sigterm)
+
+    try:
+        prompt = _headless_prompt(parser, args.prompt)
+        with redirect_stdout(sys.stderr):
+            try:
+                runtime = TiaRuntime.from_environment(
+                    workspace=args.workspace,
+                    model=args.model,
+                )
+            except Exception:
+                writer.write(
+                    RunFailedEvent(
+                        session_id=session_id,
+                        run_id=run_id,
+                        sequence=0,
+                        code="configuration_error",
+                        message="Configuration TIA invalide.",
+                    )
+                )
+                return 1
+
+            try:
+                return asyncio.run(
+                    _stream_headless(
+                        runtime,
+                        prompt=prompt,
+                        session_id=session_id,
+                        run_id=run_id,
+                        state=state,
+                        writer=writer,
+                    )
+                )
+            except Exception as exc:
+                writer.write(
+                    RunFailedEvent(
+                        session_id=session_id,
+                        run_id=run_id,
+                        sequence=state.last_sequence + 1,
+                        code="run_error",
+                        message=(
+                            runtime.redact(str(exc)) or "Le run TIA a échoué."
+                        ),
+                    )
+                )
+                return 1
+    except KeyboardInterrupt:
+        if not state.interrupted_event_written:
+            writer.write(
+                RunFailedEvent(
+                    session_id=session_id,
+                    run_id=run_id,
+                    sequence=state.last_sequence + 1,
+                    code="interrupted",
+                    message="Exécution interrompue.",
+                )
+            )
+        return state.interrupt_exit_code
+    except BrokenPipeError:
+        return 0
+    finally:
+        if previous_sigterm_handler is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm_handler)
+
+
 def main() -> None:
     if len(sys.argv) > 1 and sys.argv[1] == "init":
         _run_init_command()
         return
+    if len(sys.argv) > 1 and sys.argv[1] == "run":
+        exit_code = _run_headless_command()
+        if exit_code:
+            raise SystemExit(exit_code)
+        return
 
-    initialization = initialize_global_config()
     args = build_parser().parse_args()
-    process_environment = dict(os.environ)
-    global_environment = read_env_file(initialization.root / ".env")
-    workspace = resolve_workspace(
-        args.workspace,
-        process_environment,
-        global_environment,
+    runtime = TiaRuntime.from_environment(
+        workspace=args.workspace,
+        model=args.model,
     )
-    project_environment = read_env_file(workspace / ".env")
-    effective_environment = compose_environment(
-        global_environment,
-        project_environment,
-        process_environment,
-    )
-    os.environ.update(effective_environment)
-
-    overrides = {}
-    overrides["workspace"] = workspace
-    if args.model:
-        overrides["model"] = args.model
-    if "TIA_GLOBAL_SKILLS_DIRECTORY" not in effective_environment:
-        overrides["global_skills_directory"] = initialization.root / "skills"
-
-    settings = Settings(**overrides)
-    global_skills_directory = (
-        settings.global_skills_directory or initialization.root / "skills"
-    )
-    paths = build_runtime_paths(
-        initialization.root,
-        settings.workspace,
-        setup_file=settings.setup_file,
-        instructions_file=settings.instructions_file,
-        skills_directory=settings.skills_directory,
-        global_skills_directory=global_skills_directory,
-    )
-    setup = load_layered_agent_setup(paths.global_setup, paths.project_setup)
-    asyncio.run(
-        run_interactive(
-            settings,
-            args.prompt,
-            paths=paths,
-            setup=setup,
-        )
-    )
+    asyncio.run(run_interactive(runtime, args.prompt))
 
 
 if __name__ == "__main__":

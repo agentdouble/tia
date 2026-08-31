@@ -123,14 +123,18 @@ async for event in session.stream("Lance les tests"):
     print(event.type)
 ```
 
-`TiaRuntime` accepte un modèle ou une `model_factory`, des tools statiques, des
-`tool_factories`, un `SessionStore` et un provider de credentials. Les factories
+`TiaRuntime` accepte un modèle ou une `model_factory`, des tools ou toolsets statiques, des
+`tool_factories`, des `toolset_factories`, un `SessionStore` et un provider de credentials. Les factories
 reçoivent un contexte propre à la session ; les providers masquent leur
 représentation et les valeurs de credentials connues sont retirées au mieux des
 résultats et erreurs. Les payloads de tools sont bornés et doivent rester JSON. Un
 tool injecté demeure toutefois une extension de confiance : il ne doit pas publier
 volontairement d'autres données sensibles. `TiaSession` sérialise ses runs, conserve
 l'historique et ne le persiste qu'après un résultat terminal réussi.
+
+Un serveur MCP peut ainsi être injecté comme toolset Pydantic AI sans être couplé
+au coeur de TIA. Le package embarque l'extra `mcp`; l'application hôte choisit le
+transport, le serveur et les permissions réellement accordées.
 
 ## Configuration portable
 

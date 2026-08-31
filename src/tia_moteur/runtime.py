@@ -14,6 +14,7 @@ from uuid import uuid4
 
 from pydantic_ai import ModelMessage
 from pydantic_ai.models import Model
+from pydantic_ai.toolsets import AbstractToolset
 from pydantic_ai.tools import Tool
 from pydantic_core import PydanticUndefined
 
@@ -43,6 +44,7 @@ from tia_moteur.workspace_instructions import WorkspaceInstructionsLoader
 
 
 AgentTool = Tool[Any] | Callable[..., Any]
+AgentToolset = AbstractToolset[Any]
 
 
 @dataclass(frozen=True)
@@ -58,6 +60,10 @@ class SessionContext:
 
 class ToolFactory(Protocol):
     def __call__(self, context: SessionContext) -> Sequence[AgentTool]: ...
+
+
+class ToolsetFactory(Protocol):
+    def __call__(self, context: SessionContext) -> Sequence[AgentToolset]: ...
 
 
 class ModelFactory(Protocol):
@@ -87,6 +93,8 @@ class TiaRuntime:
         model_factory: ModelFactory | None = None,
         tools: Sequence[AgentTool] = (),
         tool_factories: Sequence[ToolFactory] = (),
+        toolsets: Sequence[AgentToolset] = (),
+        toolset_factories: Sequence[ToolsetFactory] = (),
         session_store: SessionStore | None = None,
         credentials: CredentialProvider | Mapping[str, str] | None = None,
         command_environment: Mapping[str, str] | None = None,
@@ -101,6 +109,8 @@ class TiaRuntime:
         self._model_factory = model_factory or _configured_model
         self._tools = tuple(tools)
         self._tool_factories = tuple(tool_factories)
+        self._toolsets = tuple(toolsets)
+        self._toolset_factories = tuple(toolset_factories)
         self.session_store = (
             session_store if session_store is not None else MemorySessionStore()
         )
@@ -124,6 +134,8 @@ class TiaRuntime:
         model_factory: ModelFactory | None = None,
         tools: Sequence[AgentTool] = (),
         tool_factories: Sequence[ToolFactory] = (),
+        toolsets: Sequence[AgentToolset] = (),
+        toolset_factories: Sequence[ToolsetFactory] = (),
         session_store: SessionStore | None = None,
         credentials: CredentialProvider | Mapping[str, str] | None = None,
     ) -> "TiaRuntime":
@@ -184,6 +196,8 @@ class TiaRuntime:
             model_factory=model_factory,
             tools=tools,
             tool_factories=tool_factories,
+            toolsets=toolsets,
+            toolset_factories=toolset_factories,
             session_store=session_store,
             credentials=runtime_credentials,
             command_environment=effective_environment,
@@ -216,6 +230,9 @@ class TiaRuntime:
         injected_tools = list(self._tools)
         for factory in self._tool_factories:
             injected_tools.extend(factory(context))
+        injected_toolsets = list(self._toolsets)
+        for factory in self._toolset_factories:
+            injected_toolsets.extend(factory(context))
         _validate_tool_names(injected_tools, self.setup)
         agent = build_agent(
             self.settings,
@@ -223,6 +240,7 @@ class TiaRuntime:
             self.setup,
             model=model,
             additional_tools=injected_tools,
+            additional_toolsets=injected_toolsets,
             command_environment=self._command_environment,
         )
         return TiaSession(

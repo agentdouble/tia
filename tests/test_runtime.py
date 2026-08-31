@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic_ai import models
 from pydantic_ai.models.test import TestModel
+from pydantic_ai.toolsets import FunctionToolset
 
 from tia_moteur.agent_setup import AgentSetup
 from tia_moteur.credentials import MappingCredentials
@@ -35,6 +36,8 @@ def make_runtime(
     model: TestModel,
     tools=(),
     tool_factories=(),
+    toolsets=(),
+    toolset_factories=(),
     model_factory=None,
     store=None,
     credentials=None,
@@ -82,6 +85,8 @@ def make_runtime(
         model_factory=model_factory,
         tools=tools,
         tool_factories=tool_factories,
+        toolsets=toolsets,
+        toolset_factories=toolset_factories,
         session_store=store,
         credentials=credentials,
     )
@@ -144,6 +149,27 @@ async def test_injected_tool_emits_correlated_events(tmp_path: Path) -> None:
         if isinstance(event, (TextStartedEvent, TextDeltaEvent))
     ]
     assert {event.response_index for event in text_events} == {1}
+
+
+async def test_injected_toolset_emits_correlated_events(tmp_path: Path) -> None:
+    async def lookup(query: str) -> str:
+        return f"source:{query}"
+
+    runtime = make_runtime(
+        tmp_path,
+        model=TestModel(call_tools=["lookup"], custom_output_text="Sourcé"),
+        toolset_factories=[lambda context: [FunctionToolset([lookup])]],
+    )
+
+    events = await collect(runtime.create_session(), "Recherche")
+
+    calls = [event for event in events if isinstance(event, ToolCalledEvent)]
+    completions = [
+        event for event in events if isinstance(event, ToolCompletedEvent)
+    ]
+    assert [event.name for event in calls] == ["lookup"]
+    assert [event.name for event in completions] == ["lookup"]
+    assert completions[0].result == "source:a"
 
 
 async def test_store_resumes_history_by_session_id(tmp_path: Path) -> None:

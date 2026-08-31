@@ -5,6 +5,7 @@ from typing import Any
 
 from pydantic_ai import Agent
 from pydantic_ai.models import Model
+from pydantic_ai.toolsets import AbstractToolset
 
 from tia_moteur.agent_setup import AgentSetup, load_agent_setup
 from tia_moteur.config import Settings
@@ -42,9 +43,10 @@ def build_agent(
     *,
     model: Model | str | None = None,
     additional_tools: Sequence[Any] = (),
+    additional_toolsets: Sequence[AbstractToolset[Any]] = (),
     command_environment: Mapping[str, str] | None = None,
 ) -> Agent[None, str]:
-    """Construit un agent avec les capacités natives puis les tools injectés."""
+    """Construit un agent avec les capacités natives puis les extensions injectées."""
     active_setup = setup or load_agent_setup(settings.setup_file)
     tools: list[Any] = []
 
@@ -68,5 +70,6 @@ def build_agent(
         settings.model if model is None else model,
         instructions=AGENT_INSTRUCTIONS,
         tools=tools,
+        toolsets=additional_toolsets,
         defer_model_check=True,
     )

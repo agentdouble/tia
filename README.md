@@ -72,6 +72,70 @@ Dans le mode interactif, saisis `exit` pour quitter.
 Lorsqu'un tool est utilisé, la CLI affiche uniquement son nom. Pour `run_bash`,
 elle ajoute la commande exécutée sur la même ligne, sans afficher le résultat brut.
 
+## Mode headless JSONL
+
+Une application peut lancer TIA comme sous-processus sans dépendre du rendu
+terminal :
+
+```bash
+tia run --format jsonl --workspace /chemin/du/projet \
+  "Liste les fichiers Python"
+```
+
+Le prompt peut aussi être transmis sur `stdin` :
+
+```bash
+printf 'Liste les fichiers Python' | tia run --format jsonl
+```
+
+Dans ce mode, `stdout` contient uniquement des événements JSONL compacts et
+versionnés. Chaque événement porte `session_id`, `run_id` et une `sequence` :
+
+```json
+{"schema_version":1,"type":"run.started","session_id":"...","run_id":"...","sequence":0,"model":"test","workspace":"/tmp","restored":false}
+{"schema_version":1,"type":"text.delta","session_id":"...","run_id":"...","sequence":1,"part_index":0,"content":"Bonjour"}
+{"schema_version":1,"type":"run.completed","session_id":"...","run_id":"...","sequence":2,"output":"Bonjour","usage":{"input_tokens":10,"output_tokens":2,"cache_write_tokens":0,"cache_read_tokens":0,"requests":1,"tool_calls":0}}
+```
+
+Les types V1 sont `run.started`, `instructions.changed`, `skill.activated`,
+`text.started`, `text.delta`, `tool.called`, `tool.completed`, `run.completed`
+et `run.failed`. Les logs et erreurs de syntaxe vont sur `stderr`. Les codes de
+sortie sont `0` pour un résultat, `1` pour une erreur de configuration ou de run,
+`2` pour un usage invalide et `130` pour une interruption.
+
+`--session-id` fixe l'identifiant de corrélation. Le stockage headless par défaut
+reste en mémoire du processus : reprendre une conversation entre deux processus
+demande un `SessionStore` persistant injecté dans le runtime.
+
+## Coeur réutilisable
+
+La CLI interactive et le mode headless utilisent le même coeur :
+
+```python
+from tia_moteur import TiaRuntime
+
+runtime = TiaRuntime.from_environment(workspace="/chemin/du/projet")
+session = runtime.create_session(session_id="conversation-123")
+
+result = await session.run("Analyse le projet")
+
+async for event in session.stream("Lance les tests"):
+    print(event.type)
+```
+
+`TiaRuntime` accepte un modèle ou une `model_factory`, des tools ou toolsets statiques, des
+`tool_factories`, des `toolset_factories`, un `SessionStore` et un provider de credentials. Les factories
+reçoivent un contexte propre à la session ; les providers masquent leur
+représentation et les valeurs de credentials connues sont retirées au mieux des
+résultats et erreurs. Les payloads de tools sont bornés et doivent rester JSON. Un
+tool injecté demeure toutefois une extension de confiance : il ne doit pas publier
+volontairement d'autres données sensibles. `TiaSession` sérialise ses runs, conserve
+l'historique et ne le persiste qu'après un résultat terminal réussi.
+
+Un serveur MCP peut ainsi être injecté comme toolset Pydantic AI sans être couplé
+au coeur de TIA. Le package embarque l'extra `mcp`; l'application hôte choisit le
+transport, le serveur et les permissions réellement accordées.
+
 ## Configuration portable
 
 TIA charge toujours `~/.config/tia`, puis ajoute la configuration optionnelle du
@@ -171,6 +235,11 @@ $skill-creator crée un skill pour analyser les logs Python
 - `AGENTS.md` : conventions propres au workspace ;
 - `workspace_instructions.py` : chargement borné et relecture par tour ;
 - `portable_config.py` : bootstrap global, détection projet et couches `.env` ;
+- `runtime.py` : configuration résolue, injection et création des sessions ;
+- `session.py` : historique, exécution et traduction des événements provider ;
+- `events.py` : protocole public JSONL versionné ;
+- `session_store.py` : contrat de persistance et implémentation mémoire ;
+- `credentials.py` : injection de secrets avec représentation masquée ;
 - `skills/` : découverte, validation, activation et tool `load_skill` ;
 - `agent.py` : prompt système et assemblage agent/outils ;
 - `tools/bash.py` : exécution directe, timeout et limite de sortie ;

@@ -57,11 +57,10 @@ def test_reloads_content_and_changes_digest(tmp_path: Path) -> None:
     assert first.digest != second.digest
 
 
-def test_rejects_empty_file(tmp_path: Path) -> None:
+def test_empty_file_is_ignored(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("  \n", encoding="utf-8")
 
-    with pytest.raises(WorkspaceInstructionsError, match="vide"):
-        make_loader(tmp_path).load()
+    assert make_loader(tmp_path).load() is None
 
 
 def test_rejects_oversized_file(tmp_path: Path) -> None:

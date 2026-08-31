@@ -1,6 +1,11 @@
-"""Construction de l'agent et assemblage de ses outils."""
+"""Construction de l'agent et assemblage injectable de ses outils."""
+
+from collections.abc import Mapping, Sequence
+from typing import Any
 
 from pydantic_ai import Agent
+from pydantic_ai.models import Model
+from pydantic_ai.toolsets import AbstractToolset
 
 from tia_moteur.agent_setup import AgentSetup, load_agent_setup
 from tia_moteur.config import Settings
@@ -35,10 +40,15 @@ def build_agent(
     settings: Settings,
     skill_registry: SkillRegistry | None = None,
     setup: AgentSetup | None = None,
+    *,
+    model: Model | str | None = None,
+    additional_tools: Sequence[Any] = (),
+    additional_toolsets: Sequence[AbstractToolset[Any]] = (),
+    command_environment: Mapping[str, str] | None = None,
 ) -> Agent[None, str]:
-    """Construit un agent Pydantic AI muni du tool Bash."""
+    """Construit un agent avec les capacités natives puis les extensions injectées."""
     active_setup = setup or load_agent_setup(settings.setup_file)
-    tools = []
+    tools: list[Any] = []
 
     if active_setup.tools.bash.enabled:
         bash_executor = BashExecutor(
@@ -46,6 +56,7 @@ def build_agent(
             timeout_seconds=settings.command_timeout_seconds,
             max_output_chars=settings.max_output_chars,
             policy=BashPolicy(active_setup.tools.bash),
+            environment=command_environment,
         )
         tools.append(create_bash_tool(bash_executor))
 
@@ -53,9 +64,12 @@ def build_agent(
         registry = skill_registry or SkillRegistry.from_settings(settings)
         tools.append(create_load_skill_tool(registry))
 
+    tools.extend(additional_tools)
+
     return Agent(
-        settings.model,
+        settings.model if model is None else model,
         instructions=AGENT_INSTRUCTIONS,
         tools=tools,
+        toolsets=additional_toolsets,
         defer_model_check=True,
     )
